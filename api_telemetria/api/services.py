@@ -8,7 +8,7 @@ from django.conf import settings
 from django.core.files.storage import FileSystemStorage
 from django.db import transaction, connection
 
-from telemetria.models import MedicaoVeiculoTemp, Veiculo, Medicao
+from api_telemetria.models import MedicaoVeiculoTemp, Veiculo, Medicao
 
 def executar_procedure_pos_importacao(arquivoid):
     """

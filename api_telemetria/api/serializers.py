@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from telemetria import models
+from api_telemetria import models
 
 
 class MarcaSerializer(serializers.ModelSerializer):
