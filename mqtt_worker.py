@@ -2,85 +2,110 @@ import datetime
 import os
 import json
 import django
+import logging
 import paho.mqtt.client as mqtt
-from django.utils import timezone
 
-# inicializa o Django
+# Inicializa Django
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "setup.settings")
 django.setup()
 
 from django.conf import settings
 from api_telemetria.models import MedicaoVeiculo, Veiculo, Medicao
 
+# Logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("mqtt_worker")
+
 
 def on_connect(client, userdata, flags, rc):
-    print(f"[MQTT] Conectado com rc={rc}")
+    logger.info(f"[MQTT] Conectado com rc={rc}")
 
     topic = settings.MQTT.get("TOPIC", "planta/sensores/#")
     client.subscribe(topic)
-    print(f"[MQTT] Inscrito em {topic}")
+    logger.info(f"[MQTT] Inscrito em {topic}")
 
 
 def processar_item(data):
-    valor = float(data["valor"])
-    veiculoid = int(data["veiculoid"])
-    medicaoid = int(data["medicaoid"])
-    datae = datetime.datetime.fromisoformat(data["data"])
+    try:
+        valor = float(data.get("valor"))
+        veiculoid = int(data.get("veiculoid"))
+        medicaoid = int(data.get("medicaoid"))
+        datae = datetime.datetime.fromisoformat(data.get("data"))
 
-    veiculo = Veiculo.objects.get(id=veiculoid)
-    medicao = Medicao.objects.get(id=medicaoid)
+    except Exception as e:
+        logger.error(f"[ERRO] Dados inválidos: {data} | erro={e}")
+        return None
 
-    MedicaoVeiculo.objects.create(
+    # Buscar relações com segurança
+    try:
+        veiculo = Veiculo.objects.get(id=veiculoid)
+    except Veiculo.DoesNotExist:
+        logger.warning(f"[WARN] Veiculo {veiculoid} não encontrado")
+        return None
+
+    try:
+        medicao = Medicao.objects.get(id=medicaoid)
+    except Medicao.DoesNotExist:
+        logger.warning(f"[WARN] Medicao {medicaoid} não encontrada")
+        return None
+
+    return MedicaoVeiculo(
         data=datae,
         veiculo=veiculo,
         medicao=medicao,
         valor=valor,
     )
 
-    print(f"[MQTT] Salvo: veiculo={veiculoid} sensor={medicaoid} valor={valor}")
-
 
 def on_message(client, userdata, msg):
     try:
         payload = json.loads(msg.payload.decode())
-
-        # Se vier apenas 1 objeto json
-        if isinstance(payload, dict):
-            processar_item(payload)
-
-        # Se vier um vetor/lista de json
-        elif isinstance(payload, list):
-            for item in payload:
-                try:
-                    processar_item(item)
-                except Exception as e:
-                    print(f"[ERRO] Falha ao processar item da lista: {e} | item={item}")
-
-        else:
-            print("[ERRO] Payload recebido não é nem objeto JSON nem lista JSON")
-
     except Exception as e:
-        print(f"[ERRO] Falha ao processar mensagem: {e}")
+        logger.error(f"[ERRO] JSON inválido: {e}")
+        return
+
+    itens = []
+
+    if isinstance(payload, dict):
+        item = processar_item(payload)
+        if item:
+            itens.append(item)
+
+    elif isinstance(payload, list):
+        for obj in payload:
+            item = processar_item(obj)
+            if item:
+                itens.append(item)
+    else:
+        logger.error("[ERRO] Payload não é dict nem list")
+        return
+
+    # Salvar em lote (muito mais rápido)
+    if itens:
+        MedicaoVeiculo.objects.bulk_create(itens)
+        logger.info(f"[MQTT] {len(itens)} registros salvos")
 
 
 def main():
     mqtt_cfg = settings.MQTT
 
-    host = mqtt_cfg.get("HOST", "127.0.0.1")
-    port = mqtt_cfg.get("PORT", 1883)
-    user = mqtt_cfg.get("USERNAME")
-    password = mqtt_cfg.get("PASSWORD")
-
     client = mqtt.Client()
 
-    if user and password:
-        client.username_pw_set(user, password)
+    if mqtt_cfg.get("USERNAME") and mqtt_cfg.get("PASSWORD"):
+        client.username_pw_set(
+            mqtt_cfg.get("USERNAME"),
+            mqtt_cfg.get("PASSWORD")
+        )
 
     client.on_connect = on_connect
     client.on_message = on_message
 
-    print(f"[MQTT] Conectando em {host}:{port}…")
-    client.connect(host, port, 60)
+    logger.info(f"[MQTT] Conectando em {mqtt_cfg.get('HOST')}:{mqtt_cfg.get('PORT')}")
+    client.connect(
+        mqtt_cfg.get("HOST"),
+        mqtt_cfg.get("PORT"),
+        mqtt_cfg.get("KEEPALIVE", 60)
+    )
 
     client.loop_forever()
 
